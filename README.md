@@ -5,6 +5,11 @@ without the cursor, then re-renders everything on top: the camera zooms into wha
 cursor is redrawn and smoothed, and the recording sits on a background with padding, rounded
 corners and a shadow. The editor is a timeline where every one of those decisions can be changed.
 
+![A recording sitting on a generated wallpaper with rounded corners, a shadow and an inset bezel, the re-rendered cursor mid-click with a ripple, and a Ctrl + Shift + E keystroke pill below the frame](docs/hero.jpg)
+
+<sub>An exported frame, rendered by the app's own compositor. The application inside the frame is a
+mock-up drawn in code, not a real capture.</sub>
+
 Windows only. There are no prebuilt downloads yet — build it from source with the steps below.
 
 ## What it does
