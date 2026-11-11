@@ -16,7 +16,7 @@ interface TrackDef {
 }
 
 const TRACKS: TrackDef[] = [
-  { track: 'zooms', label: 'Zoom', className: 'seg-zoom', text: (z) => `${z.zoom.toFixed(1)}× ${z.mode === 'follow' ? 'follow' : 'fixed'}${z.auto ? ' · auto' : ''}` },
+  { track: 'zooms', label: 'Zoom', className: 'seg-zoom', text: (z) => `${Math.round(z.zoom * 100)}% ${z.mode === 'follow' ? 'auto' : 'manual'}${z.disabled ? ' · off' : ''}` },
   { track: 'speeds', label: 'Speed', className: 'seg-speed', text: (s) => `${s.speed}×` },
   { track: 'masks', label: 'Masks', className: 'seg-mask', text: (m) => (m.kind === 'blur' ? 'Blur' : 'Highlight') },
   { track: 'cameraSegments', label: 'Camera', className: 'seg-camera', text: (c) => (c.layout === 'hidden' ? 'Hidden' : 'Fullscreen') }
@@ -157,7 +157,7 @@ export function Timeline(): React.JSX.Element {
       return (
         <div
           key={s.id}
-          className={`seg ${def.className} ${sel ? 'sel' : ''}`}
+          className={`seg ${def.className} ${sel ? 'sel' : ''} ${(s as { disabled?: boolean }).disabled ? 'off' : ''}`}
           style={{ left: x(s.start), width: Math.max(4, x(s.end) - x(s.start)) }}
           onPointerDown={dragSegment(def.track, s, 'move')}
           title={def.text(s)}
@@ -190,7 +190,7 @@ export function Timeline(): React.JSX.Element {
           </span>
         </div>
         <div style={{ flex: 1 }} />
-        <button className="btn sm" onClick={() => addSegment('zooms', { zoom: 1.8, mode: 'follow', target: { x: 0.5, y: 0.5 }, auto: false })} title="Add zoom (Z)">
+        <button className="btn sm" onClick={() => addSegment('zooms', { zoom: 1.6, mode: 'follow', target: { x: 0.5, y: 0.5 }, auto: false })} title="Add zoom (Z)">
           <Icon.zoom size={14} /> Zoom
         </button>
         <button className="btn sm" onClick={() => addSegment('cuts', {}, 1500)} title="Cut out a section (C)">

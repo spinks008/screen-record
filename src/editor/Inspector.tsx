@@ -1,12 +1,149 @@
-import { useEffect, useState } from 'react'
-import type { Aspect, Corner, EditState, Preset, Settings, Style } from '@shared/types'
-import { GRADIENTS, SOLID_COLORS, defaultStyle } from '../engine/defaults'
+import { useEffect, useMemo, useState } from 'react'
+import type { Aspect, ClickEffect, Corner, EditState, MotionPreset, MotionSettings, Preset, Settings, SpringConfig, Style } from '@shared/types'
+import { GRADIENTS, MESHES, SOLID_COLORS, defaultStyle, type MeshPreset } from '../engine/defaults'
 import { generateAutoZooms, newId } from '../engine/autoZoom'
+import { CURSOR_PRESETS, SCREEN_PRESETS, motionFromPreset } from '../engine/spring'
+import { CURSOR_ART_STYLES, cursorArt } from '../engine/cursorArt'
 import { api } from '../lib/api'
 import { Icon } from '../lib/icons'
 import { useEditor } from './store'
 
-type Tab = 'style' | 'cursor' | 'camera' | 'keys' | 'audio'
+type Tab = 'style' | 'cursor' | 'motion' | 'camera' | 'keys' | 'audio'
+
+function Group({ title, children, open }: { title: string; children: React.ReactNode; open?: boolean }): React.JSX.Element {
+  return (
+    <details className="group" open={open}>
+      <summary>{title}</summary>
+      <div className="group-body">{children}</div>
+    </details>
+  )
+}
+
+/** CSS approximation of a mesh wallpaper, for its swatch. */
+function meshCss(m: MeshPreset): string {
+  const blobs = m.blobs.map((b) => `radial-gradient(circle at ${b.x * 100}% ${b.y * 100}%, ${b.color} 0, transparent ${Math.round(b.r * 120)}%)`)
+  return [...blobs, m.base].join(', ')
+}
+
+const PRESET_LABELS: { value: MotionPreset; label: string }[] = [
+  { value: 'slow', label: 'Slow' },
+  { value: 'medium', label: 'Medium' },
+  { value: 'quick', label: 'Quick' },
+  { value: 'rapid', label: 'Rapid' }
+]
+
+/** Tension / friction / mass sliders; editing any of them makes the preset 'custom'. */
+function SpringSliders({ value, onChange }: { value: MotionSettings; onChange: (s: SpringConfig) => void }): React.JSX.Element {
+  const set = (patch: Partial<SpringConfig>): void => onChange({ tension: value.tension, friction: value.friction, mass: value.mass, ...patch })
+  return (
+    <>
+      <Slider label="Tension · how fast it accelerates" value={value.tension} min={10} max={1000} step={5} format={(v) => String(Math.round(v))} onChange={(v) => set({ tension: v })} />
+      <Slider label="Friction · how much it resists overshooting" value={value.friction} min={1} max={100} step={0.5} format={(v) => v.toFixed(1)} onChange={(v) => set({ friction: v })} />
+      <Slider label="Mass · weight and momentum" value={value.mass} min={0.2} max={5} step={0.05} format={(v) => v.toFixed(2)} onChange={(v) => set({ mass: v })} />
+    </>
+  )
+}
+
+type SetStyle = (fn: (s: Style) => void, key?: string) => void
+
+function CursorPanel({ style, setStyle }: { style: Style; setStyle: SetStyle }): React.JSX.Element {
+  const cs = style.cursor
+  // Arrow thumbnails for each look, rendered once.
+  const thumbs = useMemo(() => Object.fromEntries(CURSOR_ART_STYLES.map((a) => [a.id, cursorArt(a.id).arrow.canvas.toDataURL()])), [])
+  return (
+    <>
+      <Toggle label="Show cursor" value={cs.visible} onChange={(v) => setStyle((s) => void (s.cursor.visible = v))} />
+      <Slider label="Size" value={cs.size} min={0.6} max={4} format={(v) => `${v.toFixed(1)}×`} onChange={(v) => setStyle((s) => void (s.cursor.size = v), 'cursor-size')} />
+      <div className="field">
+        <div className="label">Style</div>
+        <div className="art-grid">
+          {CURSOR_ART_STYLES.map((a) => (
+            <button key={a.id} title={a.label} className={cs.art === a.id ? 'on' : ''} onClick={() => setStyle((s) => void (s.cursor.art = a.id))}>
+              <img src={thumbs[a.id]} alt={a.label} />
+            </button>
+          ))}
+        </div>
+      </div>
+      <Toggle label="Always use the arrow" value={cs.alwaysArrow} onChange={(v) => setStyle((s) => void (s.cursor.alwaysArrow = v))} />
+      {!cs.alwaysArrow && (
+        <Slider label="Ignore shape changes shorter than" value={cs.typeHoldMs} min={0} max={600} step={10} format={(v) => `${Math.round(v)} ms`} onChange={(v) => setStyle((s) => void (s.cursor.typeHoldMs = v), 'type-hold')} />
+      )}
+      <Toggle label="Hide when not moving" value={cs.hideIdle} onChange={(v) => setStyle((s) => void (s.cursor.hideIdle = v))} />
+      {cs.hideIdle && (
+        <Slider label="Hide after" value={cs.idleMs} min={500} max={8000} step={100} format={(v) => `${(v / 1000).toFixed(1)}s`} onChange={(v) => setStyle((s) => void (s.cursor.idleMs = v), 'idle')} />
+      )}
+      <div className="field">
+        <div className="label">Click effect</div>
+        <Segmented<ClickEffect>
+          value={cs.clickEffect}
+          options={[
+            { value: 'none', label: 'None' },
+            { value: 'circle', label: 'Circle' },
+            { value: 'ripple', label: 'Ripple' }
+          ]}
+          onChange={(v) => setStyle((s) => void (s.cursor.clickEffect = v))}
+        />
+      </div>
+      <Toggle label="Click sound" value={cs.clickSound.enabled} onChange={(v) => setStyle((s) => void (s.cursor.clickSound.enabled = v))} />
+      {cs.clickSound.enabled && (
+        <Slider label="Click volume" value={cs.clickSound.volume} min={0} max={1.5} format={pct} onChange={(v) => setStyle((s) => void (s.cursor.clickSound.volume = v), 'click-vol')} />
+      )}
+      <Toggle label="Return to start at the end (loop)" value={cs.loopToStart} onChange={(v) => setStyle((s) => void (s.cursor.loopToStart = v))} />
+    </>
+  )
+}
+
+function MotionPanel({ style, setStyle }: { style: Style; setStyle: SetStyle }): React.JSX.Element {
+  const mb = style.motionBlur
+  const setSpring = (which: 'cursor' | 'screen', cfg: SpringConfig): void =>
+    setStyle((s) => void (s.motion[which] = { preset: 'custom', ...cfg }), `spring-${which}`)
+  return (
+    <>
+      <div className="insp-section">Cursor movement</div>
+      <div className="field">
+        <Segmented<MotionPreset | 'off' | 'custom'>
+          value={style.motion.cursor.preset}
+          options={[{ value: 'off', label: 'Off' }, ...PRESET_LABELS]}
+          onChange={(v) =>
+            setStyle((s) => {
+              if (v === 'off') s.motion.cursor.preset = 'off'
+              else if (v !== 'custom') s.motion.cursor = motionFromPreset(CURSOR_PRESETS, v)
+            })
+          }
+        />
+      </div>
+      {style.motion.cursor.preset !== 'off' && (
+        <Group title={style.motion.cursor.preset === 'custom' ? 'Advanced (custom)' : 'Advanced'}>
+          <SpringSliders value={style.motion.cursor} onChange={(c) => setSpring('cursor', c)} />
+        </Group>
+      )}
+
+      <div className="insp-section">Zoom &amp; pan</div>
+      <div className="field">
+        <Segmented<MotionPreset | 'off' | 'custom'>
+          value={style.motion.screen.preset}
+          options={PRESET_LABELS}
+          onChange={(v) => setStyle((s) => void (s.motion.screen = motionFromPreset(SCREEN_PRESETS, v === 'off' || v === 'custom' ? 'quick' : v)))}
+        />
+      </div>
+      <Group title={style.motion.screen.preset === 'custom' ? 'Advanced (custom)' : 'Advanced'}>
+        <SpringSliders value={style.motion.screen} onChange={(c) => setSpring('screen', c)} />
+        <p className="faint">Low friction makes zooms bounce; the view still never leaves the recording.</p>
+      </Group>
+
+      <div className="insp-section">Motion blur</div>
+      <Toggle label="Motion blur" value={mb.enabled} onChange={(v) => setStyle((s) => void (s.motionBlur.enabled = v))} />
+      {mb.enabled && (
+        <Group title="Advanced motion blur">
+          <Slider label="Zooming in or out" value={mb.zoom} min={0} max={1} format={pct} onChange={(v) => setStyle((s) => void (s.motionBlur.zoom = v), 'mb-zoom')} />
+          <Slider label="Panning while zoomed" value={mb.pan} min={0} max={1} format={pct} onChange={(v) => setStyle((s) => void (s.motionBlur.pan = v), 'mb-pan')} />
+          <Slider label="Cursor" value={mb.cursor} min={0} max={1} format={pct} onChange={(v) => setStyle((s) => void (s.motionBlur.cursor = v), 'mb-cursor')} />
+          <Slider label="Camera" value={mb.camera} min={0} max={1} format={pct} onChange={(v) => setStyle((s) => void (s.motionBlur.camera = v), 'mb-camera')} />
+        </Group>
+      )}
+    </>
+  )
+}
 
 function Slider(props: {
   label: string
@@ -62,6 +199,7 @@ export function Inspector(): React.JSX.Element {
   const tabs: { id: Tab; label: string }[] = [
     { id: 'style', label: 'Frame' },
     { id: 'cursor', label: 'Cursor' },
+    { id: 'motion', label: 'Motion' },
     { id: 'camera', label: 'Camera' },
     { id: 'keys', label: 'Keys' },
     { id: 'audio', label: 'Audio' }
@@ -79,31 +217,8 @@ export function Inspector(): React.JSX.Element {
       </div>
       <div className="insp-body scroll">
         {tab === 'style' && <FramePanel style={style} setStyle={setStyle} projectId={project.id} />}
-        {tab === 'cursor' && (
-          <>
-            <Toggle label="Show cursor" value={style.cursor.visible} onChange={(v) => setStyle((s) => void (s.cursor.visible = v))} />
-            <Slider label="Size" value={style.cursor.size} min={0.6} max={4} format={(v) => `${v.toFixed(1)}×`} onChange={(v) => setStyle((s) => void (s.cursor.size = v), 'cursor-size')} />
-            <div className="field">
-              <div className="label">Smoothing</div>
-              <Segmented
-                value={style.cursor.smoothing}
-                options={[
-                  { value: 'off', label: 'Off' },
-                  { value: 'slow', label: 'Slow' },
-                  { value: 'fast', label: 'Fast' },
-                  { value: 'rapid', label: 'Rapid' }
-                ]}
-                onChange={(v) => setStyle((s) => void (s.cursor.smoothing = v))}
-              />
-            </div>
-            <Toggle label="Hide when idle" value={style.cursor.hideIdle} onChange={(v) => setStyle((s) => void (s.cursor.hideIdle = v))} />
-            {style.cursor.hideIdle && (
-              <Slider label="Idle after" value={style.cursor.idleMs} min={500} max={8000} step={100} format={(v) => `${(v / 1000).toFixed(1)}s`} onChange={(v) => setStyle((s) => void (s.cursor.idleMs = v), 'idle')} />
-            )}
-            <Toggle label="Click effect" value={style.cursor.clickEffect} onChange={(v) => setStyle((s) => void (s.cursor.clickEffect = v))} />
-            <Toggle label="Return to start at the end (loop)" value={style.cursor.loopToStart} onChange={(v) => setStyle((s) => void (s.cursor.loopToStart = v))} />
-          </>
-        )}
+        {tab === 'cursor' && <CursorPanel style={style} setStyle={setStyle} />}
+        {tab === 'motion' && <MotionPanel style={style} setStyle={setStyle} />}
         {tab === 'camera' &&
           (project.files.camera ? (
             <>
@@ -120,6 +235,21 @@ export function Inspector(): React.JSX.Element {
                   onChange={(v) => setStyle((s) => void (s.camera.shape = v))}
                 />
               </div>
+              {style.camera.shape !== 'circle' && (
+                <div className="field">
+                  <div className="label">Proportions</div>
+                  <Segmented
+                    value={style.camera.aspect}
+                    options={[
+                      { value: 1, label: 'Square' },
+                      { value: 0.5625, label: 'Portrait' },
+                      { value: 0.75, label: '3:4' },
+                      { value: 16 / 9, label: 'Wide' }
+                    ]}
+                    onChange={(v) => setStyle((s) => void (s.camera.aspect = v))}
+                  />
+                </div>
+              )}
               <Slider label="Size" value={style.camera.size} min={0.1} max={0.5} format={pct} onChange={(v) => setStyle((s) => void (s.camera.size = v), 'cam-size')} />
               <div className="field">
                 <div className="label">Position</div>
@@ -189,9 +319,10 @@ function FramePanel({ style, setStyle, projectId }: { style: Style; setStyle: (f
         <Segmented
           value={bg.kind}
           options={[
+            { value: 'mesh', label: 'Wallpaper' },
             { value: 'gradient', label: 'Gradient' },
             { value: 'color', label: 'Color' },
-            { value: 'wallpaper', label: 'Wallpaper' },
+            { value: 'wallpaper', label: 'Desktop' },
             { value: 'image', label: 'Image' }
           ]}
           onChange={async (v) => {
@@ -202,6 +333,7 @@ function FramePanel({ style, setStyle, projectId }: { style: Style; setStyle: (f
             }
             setStyle((s) => {
               s.background.kind = v
+              if (v === 'mesh') s.background.value = MESHES[0].id
               if (v === 'gradient') s.background.value = GRADIENTS[0].id
               if (v === 'color') s.background.value = SOLID_COLORS[0]
               if (v === 'wallpaper') s.background.value = 'media://wallpaper/current'
@@ -209,6 +341,19 @@ function FramePanel({ style, setStyle, projectId }: { style: Style; setStyle: (f
           }}
         />
       </div>
+      {bg.kind === 'mesh' && (
+        <div className="swatches">
+          {MESHES.map((m) => (
+            <button
+              key={m.id}
+              title={m.name}
+              className={`swatch ${bg.value === m.id ? 'on' : ''}`}
+              style={{ background: meshCss(m) }}
+              onClick={() => setStyle((s) => void (s.background.value = m.id))}
+            />
+          ))}
+        </div>
+      )}
       {bg.kind === 'gradient' && (
         <div className="swatches">
           {GRADIENTS.map((g) => (
@@ -230,8 +375,8 @@ function FramePanel({ style, setStyle, projectId }: { style: Style; setStyle: (f
           <input type="color" className="swatch" value={bg.value.startsWith('#') ? bg.value : '#000000'} onChange={(e) => setStyle((s) => void (s.background.value = e.target.value), 'bg-color')} />
         </div>
       )}
-      {(bg.kind === 'image' || bg.kind === 'wallpaper') && (
-        <Slider label="Background blur" value={bg.blur} min={0} max={1} format={pct} onChange={(v) => setStyle((s) => void (s.background.blur = v), 'bg-blur')} />
+      {(bg.kind === 'image' || bg.kind === 'wallpaper' || bg.kind === 'mesh') && (
+        <Slider label={bg.kind === 'mesh' ? 'Softness' : 'Background blur'} value={bg.blur} min={0} max={1} format={pct} onChange={(v) => setStyle((s) => void (s.background.blur = v), 'bg-blur')} />
       )}
       {bg.kind === 'image' && (
         <button
@@ -259,8 +404,32 @@ function FramePanel({ style, setStyle, projectId }: { style: Style; setStyle: (f
       </div>
       <Slider label="Padding" value={style.padding} min={0} max={0.25} format={pct} onChange={(v) => setStyle((s) => void (s.padding = v), 'padding')} />
       <Slider label="Corner radius" value={style.radius} min={0} max={48} step={1} format={(v) => `${v}px`} onChange={(v) => setStyle((s) => void (s.radius = v), 'radius')} />
-      <Slider label="Shadow" value={style.shadow} min={0} max={1} format={pct} onChange={(v) => setStyle((s) => void (s.shadow = v), 'shadow')} />
-      <Slider label="Motion blur" value={style.motionBlur} min={0} max={1} format={pct} onChange={(v) => setStyle((s) => void (s.motionBlur = v), 'mblur')} />
+      <Toggle label="Inset · a bezel around the screen" value={style.inset.enabled} onChange={(v) => setStyle((s) => void (s.inset.enabled = v))} />
+      {style.inset.enabled && (
+        <>
+          <Slider label="Inset width" value={style.inset.width} min={2} max={40} step={1} format={(v) => `${v}px`} onChange={(v) => setStyle((s) => void (s.inset.width = v), 'inset-w')} />
+          <div className="field">
+            <div className="label">Inset color</div>
+            <Segmented
+              value={style.inset.color}
+              options={[
+                { value: 'rgba(255,255,255,0.16)', label: 'Glass' },
+                { value: 'rgba(0,0,0,0.45)', label: 'Smoke' },
+                { value: '#ffffff', label: 'White' },
+                { value: '#0b0b0f', label: 'Black' }
+              ]}
+              onChange={(v) => setStyle((s) => void (s.inset.color = v))}
+            />
+          </div>
+        </>
+      )}
+      <Slider label="Shadow" value={style.shadow.strength} min={0} max={1} format={pct} onChange={(v) => setStyle((s) => void (s.shadow.strength = v), 'shadow')} />
+      {style.shadow.strength > 0 && (
+        <Group title="Advanced shadow">
+          <Slider label="Softness" value={style.shadow.blur} min={0} max={140} step={1} format={(v) => `${v}px`} onChange={(v) => setStyle((s) => void (s.shadow.blur = v), 'shadow-blur')} />
+          <Slider label="Drop" value={style.shadow.offsetY} min={-20} max={60} step={1} format={(v) => `${v}px`} onChange={(v) => setStyle((s) => void (s.shadow.offsetY = v), 'shadow-y')} />
+        </Group>
+      )}
 
       <div className="field">
         <div className="label">
@@ -348,22 +517,27 @@ function SelectionPanel(): React.JSX.Element | null {
       </div>
       {selection.track === 'zooms' && (
         <>
-          <Slider label="Zoom level" value={seg.zoom} min={1.1} max={4} format={(v) => `${v.toFixed(1)}×`} onChange={(v) => update((s) => {
+          <Slider label="Zoom scale" value={seg.zoom} min={1.1} max={4} format={(v) => `${Math.round(v * 100)}%`} onChange={(v) => update((s) => {
             s.zoom = v
             s.auto = false
           }, `zoom-${seg.id}`)} />
           <div className="field">
-            <div className="label">Focus</div>
+            <div className="label">Zoom mode</div>
             <Segmented
               value={seg.mode}
               options={[
-                { value: 'follow', label: 'Follow cursor' },
-                { value: 'fixed', label: 'Fixed point' }
+                { value: 'follow', label: 'Auto · follows cursor' },
+                { value: 'fixed', label: 'Manual · fixed point' }
               ]}
               onChange={(v) => update((s) => void (s.mode = v))}
             />
           </div>
           {seg.mode === 'fixed' && <p className="faint">Drag the target on the preview to choose where to zoom.</p>}
+          <Toggle label="Disable this zoom" value={!!seg.disabled} onChange={(v) => update((s) => void (s.disabled = v))} />
+          <Group title="Advanced">
+            <Slider label="Snap to edges" value={seg.snapEdges ?? 0} min={0} max={1} format={pct} onChange={(v) => update((s) => void (s.snapEdges = v), `snap-${seg.id}`)} />
+            <p className="faint">Near an edge of the recording, the view snaps to it and may show a little of the background.</p>
+          </Group>
         </>
       )}
       {selection.track === 'speeds' && (

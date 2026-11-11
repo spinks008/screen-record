@@ -3,6 +3,7 @@ import { create } from 'zustand'
 import { applyPatches, enablePatches, produceWithPatches, type Patch } from 'immer'
 import type { EditState, InputEvent, Project } from '@shared/types'
 import { api } from '../lib/api'
+import { normalizeStyle } from '../engine/defaults'
 
 enablePatches()
 
@@ -56,7 +57,8 @@ export const useEditor = create<EditorState>((set, get) => ({
   future: [],
 
   async load(id) {
-    const [project, events] = await Promise.all([api.getProject(id), api.getEvents(id)])
+    const [loaded, events] = await Promise.all([api.getProject(id), api.getEvents(id)])
+    const project = { ...loaded, edit: { ...loaded.edit, style: normalizeStyle(loaded.edit.style) } }
     set({ project, events, time: project.edit.trimStart, past: [], future: [], selection: null })
   },
 

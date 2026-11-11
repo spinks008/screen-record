@@ -3,8 +3,32 @@ import type { Project, Rect } from '@shared/types'
 import { Compositor } from '../engine/compositor'
 import { outputAspect, screenRect, sourceToScreen } from '../engine/layout'
 import { buildPieces, pieceAtOrAfter } from '../engine/timeline'
+import { clickSourceTimes, synthClick } from '../engine/clickSound'
 import { mediaUrl } from '../lib/api'
 import { useEditor } from './store'
+
+let clickCtx: AudioContext | null = null
+let clickBuffer: AudioBuffer | null = null
+
+/** Plays the synthesized click (the same sample the export mixes in). */
+function playClick(volume: number): void {
+  try {
+    clickCtx ??= new AudioContext()
+    if (!clickBuffer) {
+      const data = synthClick(clickCtx.sampleRate)
+      clickBuffer = clickCtx.createBuffer(1, data.length, clickCtx.sampleRate)
+      clickBuffer.copyToChannel(data, 0)
+    }
+    const src = clickCtx.createBufferSource()
+    const gain = clickCtx.createGain()
+    gain.gain.value = volume
+    src.buffer = clickBuffer
+    src.connect(gain).connect(clickCtx.destination)
+    src.start()
+  } catch {
+    /* audio unavailable: clicks stay silent in the preview */
+  }
+}
 
 function syncMedia(el: HTMLMediaElement | null, seconds: number, rate: number, playing: boolean, tolerance = 0.15): void {
   if (!el || el.readyState < 1) return
@@ -156,11 +180,40 @@ export function Preview(): React.JSX.Element {
     else v.currentTime = useEditor.getState().time / 1000
     void v.play().catch(() => undefined)
 
+    // video.currentTime advances in uneven steps; run a wall clock and nudge it towards the
+    // video so the camera moves at an even pace. Large gaps (seeks, cuts, stalls) snap straight to it.
+    let clockT = -1
+    let clockWall = 0
+    let clockRate = 1
+    const smoothTime = (): number => {
+      const media = v.currentTime * 1000
+      const now = performance.now()
+      let t = media
+      if (clockT >= 0 && !v.paused && !v.seeking && v.readyState >= 3) {
+        const predicted = clockT + (now - clockWall) * clockRate
+        const drift = media - predicted
+        if (Math.abs(drift) < 80) t = predicted + drift * 0.05
+      }
+      clockT = t
+      clockWall = now
+      clockRate = v.playbackRate
+      return t
+    }
+
+    // Click sounds: play each click the playhead passes (cut-away clicks are never passed).
+    const clicks = clickSourceTimes(useEditor.getState().events)
+    let lastT = -1
+
     const tick = (): void => {
       if (stopped) return
       const p = projectRef.current
       const pieces = buildPieces(p.edit, p.durationMs)
-      const t = v.currentTime * 1000
+      const t = smoothTime()
+      const sound = p.edit.style.cursor.clickSound
+      if (sound.enabled && sound.volume > 0 && lastT >= 0 && t > lastT && t - lastT < 250) {
+        for (const c of clicks) if (c > lastT && c <= t) playClick(sound.volume)
+      }
+      lastT = t
       const piece = pieceAtOrAfter(pieces, t)
       if (!piece || v.ended) {
         v.pause()

@@ -6,14 +6,14 @@ import '@pixi/unsafe-eval'
 import { MotionBlurFilter } from '@pixi/filter-motion-blur'
 import { ZoomBlurFilter } from '@pixi/filter-zoom-blur'
 import type { InputEvent, Project, Rect, Style } from '@shared/types'
-import { buildCursorModel, cursorAt, type CursorModel } from './cursor'
-import { buildFocusTrack, viewportAt } from './camera'
+import { buildCursorModel, cursorAt, sampleTrack, type CursorModel } from './cursor'
+import { buildCameraTrack, viewportAt, type CameraTrack } from './camera'
 import { buildKeyPills, pillAt, type KeyPill } from './keys'
-import { cameraRect, sceneTransform, screenRect, sourceToScreen, type SceneTransform } from './layout'
-import { GRADIENTS } from './defaults'
+import { cameraRect, cardRect, insetPx, sceneTransform, screenRect, sourceToScreen, type SceneTransform } from './layout'
+import { GRADIENTS, MESHES, type MeshPreset } from './defaults'
 import { buildPieces, type Piece } from './timeline'
 import { cursorArt, CURSOR_BASE_PX } from './cursorArt'
-import type { Track } from './cursor'
+import { cursorSpring, screenSpring } from './spring'
 
 PIXI.settings.ROUND_PIXELS = false
 
@@ -21,7 +21,6 @@ export type FrameSource = HTMLVideoElement | HTMLCanvasElement
 
 interface Derived {
   cursor: CursorModel
-  focus: Track
   pills: KeyPill[]
   pieces: Piece[]
 }
@@ -52,6 +51,10 @@ function paintBackground(style: Style, size: { width: number; height: number }, 
     c.fillRect(0, 0, canvas.width, canvas.height)
     return canvas
   }
+  if (bg.kind === 'mesh') {
+    paintMesh(c, canvas.width, canvas.height, MESHES.find((m) => m.id === bg.value) ?? MESHES[0], bg.blur)
+    return canvas
+  }
   const preset = GRADIENTS.find((g) => g.id === bg.value) ?? GRADIENTS[0]
   const a = ((preset.angle - 90) * Math.PI) / 180
   const r = Math.hypot(canvas.width, canvas.height) / 2
@@ -70,17 +73,86 @@ function paintBackground(style: Style, size: { width: number; height: number }, 
   return canvas
 }
 
+/**
+ * A procedural wallpaper: soft color blobs over a base, then a few flowing ribbons of light.
+ * `blur` (0..1) softens the ribbons further.
+ */
+export function paintMesh(c: CanvasRenderingContext2D, w: number, h: number, m: MeshPreset, blur: number): void {
+  const diag = Math.hypot(w, h)
+  const unit = Math.min(w, h) / 1080
+  c.fillStyle = m.base
+  c.fillRect(0, 0, w, h)
+  // Fade each color to a transparent version of itself; fading to transparent black grays the midtones.
+  const clear = (css: string): string => {
+    const { color } = parseColor(css)
+    return `rgba(${color >> 16},${(color >> 8) & 255},${color & 255},0)`
+  }
+  for (const b of m.blobs) {
+    const g = c.createRadialGradient(b.x * w, b.y * h, 0, b.x * w, b.y * h, b.r * diag)
+    g.addColorStop(0, b.color)
+    g.addColorStop(1, clear(b.color))
+    c.fillStyle = g
+    c.fillRect(0, 0, w, h)
+  }
+  m.ribbons.forEach((color, i) => {
+    const path = new Path2D()
+    const y0 = (0.82 - i * 0.14) * h
+    path.moveTo(-0.1 * w, y0)
+    path.bezierCurveTo(0.28 * w, (0.18 + i * 0.12) * h, 0.62 * w, (1.08 - i * 0.12) * h, 1.1 * w, (0.22 + i * 0.13) * h)
+    const g = c.createLinearGradient(0, 0, w, h)
+    g.addColorStop(0, clear(color))
+    g.addColorStop(0.45, color)
+    g.addColorStop(1, clear(color))
+    c.save()
+    c.strokeStyle = g
+    c.lineCap = 'round'
+    // A wide glow under a thinner, brighter band.
+    c.globalAlpha = 0.45
+    c.filter = `blur(${Math.round((60 + blur * 120) * unit)}px)`
+    c.lineWidth = (240 - i * 50) * unit
+    c.stroke(path)
+    c.globalAlpha = 0.6
+    c.filter = `blur(${Math.round((10 + blur * 80) * unit)}px)`
+    c.lineWidth = (70 - i * 15) * unit
+    c.stroke(path)
+    c.restore()
+  })
+  // Gentle vignette keeps the eye on the screen card (dark wallpapers only: it muddies pastels).
+  const { color } = parseColor(m.base)
+  const luma = (0.299 * (color >> 16) + 0.587 * ((color >> 8) & 255) + 0.114 * (color & 255)) / 255
+  if (luma < 0.5) {
+    const v = c.createRadialGradient(w / 2, h / 2, Math.min(w, h) * 0.35, w / 2, h / 2, diag * 0.6)
+    v.addColorStop(0, 'rgba(0,0,0,0)')
+    v.addColorStop(1, 'rgba(0,0,0,0.28)')
+    c.fillStyle = v
+    c.fillRect(0, 0, w, h)
+  }
+}
+
+/** Parses '#rgb', '#rrggbb' or 'rgb[a](r, g, b[, a])' into a Pixi color and alpha. */
+function parseColor(css: string): { color: number; alpha: number } {
+  const hex = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(css.trim())
+  if (hex) {
+    const h = hex[1].length === 3 ? hex[1].replace(/./g, (x) => x + x) : hex[1]
+    return { color: parseInt(h, 16), alpha: 1 }
+  }
+  const m = /rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)\s*(?:,\s*([\d.]+)\s*)?\)/i.exec(css)
+  if (m) return { color: (Number(m[1]) << 16) | (Number(m[2]) << 8) | Number(m[3]), alpha: m[4] === undefined ? 1 : Number(m[4]) }
+  return { color: 0xffffff, alpha: 0.16 }
+}
+
 /** Pre-rendered soft shadow for the screen card. */
-function paintShadow(rect: Rect, radius: number, strength: number, unit: number): { canvas: HTMLCanvasElement; x: number; y: number } {
-  const blur = 40 * unit
-  const pad = blur * 2
+function paintShadow(rect: Rect, radius: number, shadow: Style['shadow'], unit: number): { canvas: HTMLCanvasElement; x: number; y: number } {
+  const blur = Math.max(0, shadow.blur) * unit
+  const offsetY = shadow.offsetY * unit
+  const pad = blur * 2 + Math.abs(offsetY)
   const canvas = document.createElement('canvas')
   canvas.width = Math.max(2, Math.ceil(rect.width + pad * 2))
   canvas.height = Math.max(2, Math.ceil(rect.height + pad * 2))
   const c = canvas.getContext('2d')!
-  c.shadowColor = `rgba(0,0,0,${0.55 * strength})`
+  c.shadowColor = `rgba(0,0,0,${Math.min(1, 0.55 * shadow.strength)})`
   c.shadowBlur = blur
-  c.shadowOffsetY = 14 * unit
+  c.shadowOffsetY = offsetY
   c.fillStyle = '#000'
   c.beginPath()
   c.roundRect(pad, pad, rect.width, rect.height, radius)
@@ -100,6 +172,7 @@ export class Compositor {
   private bg = new PIXI.Sprite()
   private scene = new PIXI.Container()
   private shadow = new PIXI.Sprite()
+  private card = new PIXI.Graphics()
   private screenBox = new PIXI.Container()
   private screenMask = new PIXI.Graphics()
   private screenSprite = new PIXI.Sprite()
@@ -115,6 +188,8 @@ export class Compositor {
   private keyText: PIXI.Text
   private motionBlur = new MotionBlurFilter([0, 0], 11, 0)
   private zoomBlur = new ZoomBlurFilter({ strength: 0, center: [0, 0], innerRadius: 0 })
+  private cursorBlur = new MotionBlurFilter([0, 0], 9, 0)
+  private cameraBlur = new PIXI.BlurFilter(0, 3)
 
   private project: Project | null = null
   private events: InputEvent[] = []
@@ -130,6 +205,8 @@ export class Compositor {
   private cameraSrc: FrameSource | null = null
   private maskSprites = new Map<string, { sprite: PIXI.Sprite; mask: PIXI.Graphics; dim: PIXI.Graphics }>()
   private lastTransform: SceneTransform | null = null
+  private cameraTrack: CameraTrack | null = null
+  private cameraDeps: unknown[] = []
   private cursorTextures = new Map<string, PIXI.Texture>()
   onAssetLoaded: (() => void) | null = null
 
@@ -152,14 +229,22 @@ export class Compositor {
     })
     this.screenBox.addChild(this.screenSprite, this.overlays)
     this.screenBox.mask = this.screenMask
-    this.scene.addChild(this.shadow, this.screenMask, this.screenBox, this.ripple, this.cursorSprite)
+    this.scene.addChild(this.shadow, this.card, this.screenMask, this.screenBox, this.ripple, this.cursorSprite)
     this.cameraBox.addChild(this.cameraSprite, this.cameraMask, this.cameraBorder)
     this.cameraSprite.mask = this.cameraMask
     this.keyBox.addChild(this.keyBg, this.keyText)
     this.stage.addChild(this.bg, this.scene, this.cameraBox, this.keyBox)
-    for (const [kind, art] of Object.entries(cursorArt())) {
-      this.cursorTextures.set(kind, PIXI.Texture.from(art.canvas))
+  }
+
+  /** Cursor texture for an art style and shape, created on first use. */
+  private cursorTexture(style: Style['cursor']['art'], kind: string): PIXI.Texture {
+    const key = `${style}:${kind}`
+    let tex = this.cursorTextures.get(key)
+    if (!tex) {
+      tex = PIXI.Texture.from(cursorArt(style)[kind as keyof ReturnType<typeof cursorArt>].canvas)
+      this.cursorTextures.set(key, tex)
     }
+    return tex
   }
 
   get size(): { width: number; height: number } {
@@ -177,12 +262,12 @@ export class Compositor {
     this.project = project
     this.events = events
     const e = project.edit
-    const key = JSON.stringify([e.style.cursor.smoothing, e.style.keys.mode, events.length, project.durationMs])
+    const spring = cursorSpring(e.style.motion.cursor)
+    const key = JSON.stringify([spring, e.style.cursor.typeHoldMs, e.style.keys.mode, events.length, project.durationMs])
     if (key !== this.derivedKey) {
-      const cursor = buildCursorModel(events, project.durationMs, e.style.cursor.smoothing)
+      const cursor = buildCursorModel(events, project.durationMs, { spring, typeHoldMs: e.style.cursor.typeHoldMs })
       this.derived = {
         cursor,
-        focus: buildFocusTrack(cursor.smooth, { width: project.capture.width, height: project.capture.height }),
         pills: buildKeyPills(events, e.style.keys.mode),
         pieces: buildPieces(e, project.durationMs)
       }
@@ -241,14 +326,26 @@ export class Compositor {
   }
 
   private ensureLayout(style: Style, screen: Rect, unit: number): void {
-    const key = JSON.stringify([screen, style.radius, style.shadow, unit])
+    const out = this.size
+    const key = JSON.stringify([screen, style.radius, style.shadow, style.inset, unit])
     if (key === this.layoutKey) return
     this.layoutKey = key
     const radius = style.radius * unit
-    this.screenMask.clear().beginFill(0xffffff).drawRoundedRect(screen.x, screen.y, screen.width, screen.height, radius).endFill()
+    const inset = insetPx(style, out)
+    const card = cardRect(style, screen, out)
+    // With an inset, the content's corners follow the card's, just tighter.
+    const innerRadius = inset > 0 ? Math.max(Math.min(radius, 2 * unit), radius - inset) : radius
+    this.screenMask.clear().beginFill(0xffffff).drawRoundedRect(screen.x, screen.y, screen.width, screen.height, innerRadius).endFill()
+    this.card.clear()
+    if (inset > 0) {
+      const { color, alpha } = parseColor(style.inset.color)
+      this.card.beginFill(color, alpha).drawRoundedRect(card.x, card.y, card.width, card.height, radius).endFill()
+      // A hairline highlight on the bezel's outer edge.
+      this.card.lineStyle(Math.max(1, unit), 0xffffff, 0.18).drawRoundedRect(card.x, card.y, card.width, card.height, radius)
+    }
     const old = this.shadow.texture
-    if (style.shadow > 0) {
-      const s = paintShadow(screen, radius, style.shadow, unit)
+    if (style.shadow.strength > 0) {
+      const s = paintShadow(card, radius, style.shadow, unit)
       this.shadow.texture = PIXI.Texture.from(s.canvas)
       this.shadow.position.set(s.x, s.y)
       this.shadow.visible = true
@@ -309,6 +406,24 @@ export class Compositor {
     }
   }
 
+  /** The camera path, rebuilt only when zooms, framing or the cursor model change. */
+  private ensureCameraTrack(project: Project, d: Derived, screen: Rect, out: { width: number; height: number }): CameraTrack {
+    const style = project.edit.style
+    const ratio = { x: Math.round((out.width / screen.width) * 1000) / 1000, y: Math.round((out.height / screen.height) * 1000) / 1000 }
+    const spring = screenSpring(style.motion.screen)
+    const deps = [
+      project.edit.zooms, d.cursor, project.durationMs, ratio.x, ratio.y,
+      style.crop.x, style.crop.y, style.crop.width, style.crop.height,
+      spring.tension, spring.friction, spring.mass
+    ]
+    if (!this.cameraTrack || deps.some((v, i) => v !== this.cameraDeps[i])) {
+      const src = { width: project.capture.width, height: project.capture.height }
+      this.cameraTrack = buildCameraTrack(project.edit.zooms, project.durationMs, d.cursor.hasData ? d.cursor.smooth : null, src, style.crop, ratio, spring)
+      this.cameraDeps = deps
+    }
+    return this.cameraTrack
+  }
+
   /**
    * Renders the frame for source time `t` (ms). `dt` is the frame interval used for motion blur.
    * Video sources must already show the right frame.
@@ -339,29 +454,33 @@ export class Compositor {
     this.updateMasks(project, t, screen, srcScale, offX, offY)
 
     // Camera zoom/pan.
-    const vp = viewportAt(project.edit.zooms, t, d.focus)
-    const tr = sceneTransform(vp, screen, out)
+    const camera = this.ensureCameraTrack(project, d, screen, out)
+    const tr = sceneTransform(viewportAt(camera, t), screen, out)
     this.scene.scale.set(tr.scale)
     this.scene.position.set(tr.tx, tr.ty)
 
     // Motion blur: directional for pans, radial for zooms, scaled by how far the view moved in one frame.
+    // Both fade in from zero so the blur never pops on or off.
     const filters: PIXI.Filter[] = []
-    const strength = style.motionBlur
-    if (strength > 0) {
-      const prev = sceneTransform(viewportAt(project.edit.zooms, t - dt, d.focus), screen, out)
+    const mb = style.motionBlur
+    if (mb.enabled && (mb.pan > 0 || mb.zoom > 0)) {
+      const prev = sceneTransform(viewportAt(camera, t - dt), screen, out)
       const cx = out.width / 2
       const cy = out.height / 2
       // How far the content under the frame center travelled on screen, in output pixels.
-      const vx = ((cx - prev.tx) / prev.scale - (cx - tr.tx) / tr.scale) * tr.scale * strength
-      const vy = ((cy - prev.ty) / prev.scale - (cy - tr.ty) / tr.scale) * tr.scale * strength
-      if (Math.hypot(vx, vy) > 1.5) {
-        this.motionBlur.velocity.set(vx, vy)
+      const vx = ((cx - prev.tx) / prev.scale - (cx - tr.tx) / tr.scale) * tr.scale * mb.pan
+      const vy = ((cy - prev.ty) / prev.scale - (cy - tr.ty) / tr.scale) * tr.scale * mb.pan
+      const speed = Math.hypot(vx, vy)
+      if (speed > 0.5) {
+        const k = (speed - 0.5) / speed
+        this.motionBlur.velocity.set(vx * k, vy * k)
         filters.push(this.motionBlur)
       }
       const zoomRate = Math.abs(tr.scale - prev.scale) / tr.scale
-      if (zoomRate * strength > 0.002) {
+      const zoomStrength = Math.min(0.25, Math.max(0, zoomRate * mb.zoom - 0.001) * 6)
+      if (zoomStrength > 0) {
         this.zoomBlur.center = new PIXI.Point(cx, cy)
-        this.zoomBlur.strength = Math.min(0.25, zoomRate * strength * 6)
+        this.zoomBlur.strength = zoomStrength
         this.zoomBlur.innerRadius = Math.min(out.width, out.height) * 0.15
         filters.push(this.zoomBlur)
       }
@@ -376,41 +495,60 @@ export class Compositor {
     if (cs.visible && d.cursor.hasData) {
       const c = cursorAt(d.cursor, t, cs, piece)
       const pos = sourceToScreen(style, src, screen, c.x, c.y)
-      const art = cursorArt()[c.kind]
-      const tex = this.cursorTextures.get(c.kind)!
+      const art = cursorArt(cs.art)[c.kind]
       const sizePx = CURSOR_BASE_PX * project.capture.scaleFactor * srcScale * cs.size * c.scale
-      this.cursorSprite.texture = tex
+      this.cursorSprite.texture = this.cursorTexture(cs.art, c.kind)
       this.cursorSprite.anchor.set(art.hx, art.hy)
       this.cursorSprite.width = sizePx
       this.cursorSprite.height = sizePx
       this.cursorSprite.position.set(pos.x, pos.y)
       this.cursorSprite.alpha = c.alpha
       this.cursorSprite.visible = c.alpha > 0.01
+
+      // Cursor blur from its own movement (camera moves are already blurred with the scene).
+      this.cursorSprite.filters = null
+      if (mb.enabled && mb.cursor > 0) {
+        const p0 = sampleTrack(d.cursor.smooth, t - dt)
+        const prevPos = sourceToScreen(style, src, screen, p0.x, p0.y)
+        const bx = (pos.x - prevPos.x) * tr.scale * mb.cursor
+        const by = (pos.y - prevPos.y) * tr.scale * mb.cursor
+        const speed = Math.hypot(bx, by)
+        if (speed > 1) {
+          // Velocity is in output pixels; keep the streak at most ~1.5 cursor sizes.
+          const k = (Math.min(speed, sizePx * tr.scale * 1.5) - 1) / speed
+          this.cursorBlur.velocity.set(bx * k, by * k)
+          this.cursorSprite.filters = [this.cursorBlur]
+        }
+      }
+
       this.ripple.clear()
       if (c.ripple >= 0 && c.alpha > 0.01) {
         const rp = sourceToScreen(style, src, screen, c.rippleX, c.rippleY)
         const e = 1 - Math.pow(1 - c.ripple, 3)
-        const radius = (8 + 26 * e) * project.capture.scaleFactor * srcScale * cs.size * 0.6
-        this.ripple.beginFill(0xffffff, 0.28 * (1 - c.ripple)).drawCircle(rp.x, rp.y, radius).endFill()
-        this.ripple.lineStyle(2 * unit, 0xffffff, 0.75 * (1 - c.ripple)).drawCircle(rp.x, rp.y, radius)
+        const base = project.capture.scaleFactor * srcScale * cs.size * 0.6
+        if (cs.clickEffect === 'circle') {
+          // A soft disc that swells then fades.
+          const radius = (10 + 14 * e) * base
+          this.ripple.beginFill(0xffffff, 0.42 * (1 - c.ripple)).drawCircle(rp.x, rp.y, radius).endFill()
+        } else {
+          const radius = (8 + 26 * e) * base
+          this.ripple.beginFill(0xffffff, 0.28 * (1 - c.ripple)).drawCircle(rp.x, rp.y, radius).endFill()
+          this.ripple.lineStyle(2 * unit, 0xffffff, 0.75 * (1 - c.ripple)).drawCircle(rp.x, rp.y, radius)
+        }
       }
     } else {
       this.cursorSprite.visible = false
       this.ripple.clear()
     }
 
-    this.renderCamera(project, t, out, unit)
+    this.renderCamera(project, t, dt, out, unit)
     this.renderKeys(project, t, out, unit, d)
 
     this.renderer.render(this.stage)
   }
 
-  private renderCamera(project: Project, t: number, out: { width: number; height: number }, unit: number): void {
-    const style = project.edit.style
-    const camOk = style.camera.visible && this.sourceReady(this.cameraSrc)
-    this.cameraBox.visible = camOk
-    if (!camOk) return
-    if (this.cameraTex) this.cameraTex.baseTexture.update()
+  /** Where the webcam sits at time t: the bubble blended towards fullscreen, and how hidden it is. */
+  private cameraLayout(project: Project, t: number, out: { width: number; height: number }): { r: Rect; full: number; hidden: number; bubble: Rect } {
     const FADE = 300
     let full = 0
     let hidden = 0
@@ -419,19 +557,43 @@ export class Compositor {
       if (s.layout === 'fullscreen') full = Math.max(full, easeInOut(a))
       else hidden = Math.max(hidden, easeInOut(a))
     }
-    if (hidden >= 0.999) {
-      this.cameraBox.visible = false
-      return
-    }
-    const bubble = cameraRect(style, out)
+    const bubble = cameraRect(project.edit.style, out)
     const r = {
       x: bubble.x + (0 - bubble.x) * full,
       y: bubble.y + (0 - bubble.y) * full,
       width: bubble.width + (out.width - bubble.width) * full,
       height: bubble.height + (out.height - bubble.height) * full
     }
-    const shapeRadius = style.camera.shape === 'circle' ? bubble.width / 2 : style.camera.shape === 'rounded' ? bubble.width * 0.18 : 6 * unit
+    return { r, full, hidden, bubble }
+  }
+
+  private renderCamera(project: Project, t: number, dt: number, out: { width: number; height: number }, unit: number): void {
+    const style = project.edit.style
+    const camOk = style.camera.visible && this.sourceReady(this.cameraSrc)
+    this.cameraBox.visible = camOk
+    if (!camOk) return
+    if (this.cameraTex) this.cameraTex.baseTexture.update()
+    const { r, full, hidden, bubble } = this.cameraLayout(project, t, out)
+    if (hidden >= 0.999) {
+      this.cameraBox.visible = false
+      return
+    }
+    const short = Math.min(bubble.width, bubble.height)
+    const shapeRadius = style.camera.shape === 'circle' ? short / 2 : style.camera.shape === 'rounded' ? short * 0.2 : 6 * unit
     const radius = shapeRadius * (1 - full)
+
+    // Camera blur while the bubble grows to (or shrinks from) fullscreen.
+    const mb = style.motionBlur
+    this.cameraBox.filters = null
+    if (mb.enabled && mb.camera > 0) {
+      const prev = this.cameraLayout(project, t - dt, out).r
+      const moved = Math.max(Math.abs(r.x - prev.x), Math.abs(r.y - prev.y), Math.abs(r.width - prev.width), Math.abs(r.height - prev.height))
+      const blur = Math.min(12, moved * mb.camera * 0.25)
+      if (blur > 0.3) {
+        this.cameraBlur.blur = blur
+        this.cameraBox.filters = [this.cameraBlur]
+      }
+    }
     const tex = this.cameraSprite.texture
     const tw = tex.width || 1
     const th = tex.height || 1

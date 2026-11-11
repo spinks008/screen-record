@@ -1,12 +1,13 @@
 // Receives the rendered (silent) video from the editor, then mixes audio and/or converts to GIF with FFmpeg.
 import { app } from 'electron'
-import { closeSync, existsSync, mkdirSync, openSync, rmSync, writeSync } from 'node:fs'
+import { closeSync, existsSync, mkdirSync, openSync, rmSync, writeFileSync, writeSync } from 'node:fs'
 import { join } from 'node:path'
 import type { ExportOptions, Project } from '@shared/types'
 import { buildPieces, outputDuration } from '../../../src/engine/timeline'
+import { clickOutputTimes, encodeWav, synthClick } from '../../../src/engine/clickSound'
 import { probeHasAudio, runFfmpegOrThrow } from '../recorder/ffmpeg'
 import { defaultExportFolder } from '../paths'
-import { loadProject, projectDir } from '../projects/store'
+import { loadEvents, loadProject, projectDir } from '../projects/store'
 import { getSettings } from '../settings'
 
 interface Job {
@@ -109,6 +110,29 @@ async function audioGraph(project: Project): Promise<{ inputs: string[]; filter:
   return { inputs: usable.map((t) => t.file), filter: chains.join(';') }
 }
 
+const CLICK_TRACK_RATE = 24000
+
+/**
+ * Renders every click into one WAV laid out in output time (cuts and speed already applied),
+ * so it mixes onto the finished soundtrack without touching the source-time graph.
+ */
+function writeClickTrack(project: Project, tmpBase: string): string | null {
+  const sound = project.edit.style.cursor.clickSound
+  if (!sound?.enabled || sound.volume <= 0) return null
+  const times = clickOutputTimes(loadEvents(project.id), buildPieces(project.edit, project.durationMs))
+  if (!times.length) return null
+  const click = synthClick(CLICK_TRACK_RATE)
+  const length = Math.ceil(((times[times.length - 1] + 100) / 1000) * CLICK_TRACK_RATE) + click.length
+  const track = new Float32Array(length)
+  for (const t of times) {
+    const at = Math.round((t / 1000) * CLICK_TRACK_RATE)
+    for (let i = 0; i < click.length && at + i < length; i++) track[at + i] += click[i]
+  }
+  const file = `${tmpBase}-clicks.wav`
+  writeFileSync(file, encodeWav(track, CLICK_TRACK_RATE))
+  return file
+}
+
 function progressParser(totalMs: number, onProgress: (p: number) => void): (chunk: string) => void {
   return (chunk) => {
     const m = /time=(\d+):(\d+):(\d+\.\d+)/.exec(chunk)
@@ -123,6 +147,7 @@ export async function finishExport(token: string, opts: ExportOptions, onProgres
   const job = jobs.get(token)
   if (!job) throw new Error('Unknown export')
   closeSync(job.fd)
+  let clickFile: string | null = null
   try {
     const project = loadProject(job.projectId)
     const folder = getSettings().exportFolder ?? defaultExportFolder()
@@ -149,16 +174,28 @@ export async function finishExport(token: string, opts: ExportOptions, onProgres
 
     const out = uniquePath(folder, base, 'mp4')
     const graph = await audioGraph(project)
-    if (!graph) {
+    clickFile = writeClickTrack(project, job.tmp)
+    if (!graph && !clickFile) {
       await runFfmpegOrThrow(['-y', '-i', job.tmp, '-c', 'copy', '-movflags', '+faststart', out], undefined, signal)
       return out
+    }
+    const inputs = [...(graph?.inputs ?? []), ...(clickFile ? [clickFile] : [])]
+    const chains = graph ? [graph.filter] : []
+    let audioOut = '[aout]'
+    if (clickFile) {
+      const volume = project.edit.style.cursor.clickSound.volume
+      chains.push(`[${inputs.length}:a]aresample=48000,volume=${volume.toFixed(3)},apad[clk]`)
+      if (graph) {
+        chains.push('[aout][clk]amix=inputs=2:normalize=0:duration=longest[amixed]')
+        audioOut = '[amixed]'
+      } else audioOut = '[clk]'
     }
     await runFfmpegOrThrow(
       [
         '-y', '-i', job.tmp,
-        ...graph.inputs.flatMap((f) => ['-i', f]),
-        '-filter_complex', graph.filter,
-        '-map', '0:v', '-map', '[aout]',
+        ...inputs.flatMap((f) => ['-i', f]),
+        '-filter_complex', chains.join(';'),
+        '-map', '0:v', '-map', audioOut,
         '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-shortest',
         '-movflags', '+faststart', out
       ],
@@ -168,6 +205,7 @@ export async function finishExport(token: string, opts: ExportOptions, onProgres
     return out
   } finally {
     rmSync(job.tmp, { force: true })
+    if (clickFile) rmSync(clickFile, { force: true })
     jobs.delete(token)
   }
 }

@@ -58,11 +58,11 @@ export type InputEvent =
   | { type: 'wheel'; t: number; x: number; y: number; delta: number }
   | { type: 'key'; t: number; key: string; ctrl: boolean; shift: boolean; alt: boolean; meta: boolean }
 
-export type BackgroundKind = 'gradient' | 'color' | 'image' | 'wallpaper'
+/** gradient/mesh: preset id; color: css color; image: media URL; wallpaper: the desktop wallpaper. */
+export type BackgroundKind = 'gradient' | 'mesh' | 'color' | 'image' | 'wallpaper'
 
 export interface Background {
   kind: BackgroundKind
-  /** gradient: preset id; color: css color; image/wallpaper: media URL. */
   value: string
   blur: number
 }
@@ -70,29 +70,73 @@ export interface Background {
 export type Aspect = 'auto' | '16:9' | '9:16' | '1:1' | '4:3' | '4:5'
 export type Corner = 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right'
 
+/** Damped spring: tension (stiffness), friction (damping) and mass. */
+export interface SpringConfig {
+  tension: number
+  friction: number
+  mass: number
+}
+
+export type MotionPreset = 'slow' | 'medium' | 'quick' | 'rapid'
+
+export interface MotionSettings extends SpringConfig {
+  /** 'custom' once the spring was edited by hand; the cursor also accepts 'off' (raw movement). */
+  preset: MotionPreset | 'custom' | 'off'
+}
+
+export type CursorArtStyle = 'classic' | 'light' | 'solid' | 'gradient'
+export type ClickEffect = 'none' | 'circle' | 'ripple'
+
 export interface Style {
   background: Background
   /** Padding as a fraction of the output's shorter side. */
   padding: number
   radius: number
-  shadow: number
+  shadow: {
+    /** 0..1 opacity scale. */
+    strength: number
+    /** Blur radius and vertical offset, in px at 1080p. */
+    blur: number
+    offsetY: number
+  }
+  /** A bezel between the card edge and the screen content. Width in px at 1080p. */
+  inset: { enabled: boolean; width: number; color: string }
   aspect: Aspect
   /** Normalized crop of the source video. */
   crop: Rect
-  motionBlur: number
+  motion: {
+    cursor: MotionSettings
+    screen: MotionSettings
+  }
+  motionBlur: {
+    enabled: boolean
+    /** Radial blur while zooming in or out. */
+    zoom: number
+    /** Directional blur while the zoomed view pans. */
+    pan: number
+    cursor: number
+    camera: number
+  }
   cursor: {
     visible: boolean
     size: number
-    smoothing: 'off' | 'slow' | 'fast' | 'rapid'
+    art: CursorArtStyle
+    /** Always draw the arrow, ignoring text/link cursor shapes. */
+    alwaysArrow: boolean
+    /** Cursor shape changes shorter than this are ignored. */
+    typeHoldMs: number
     hideIdle: boolean
     idleMs: number
-    clickEffect: boolean
+    clickEffect: ClickEffect
+    clickSound: { enabled: boolean; volume: number }
     loopToStart: boolean
   }
   camera: {
     visible: boolean
     shape: 'circle' | 'rounded' | 'square'
     size: number
+    /** Width / height of the bubble; circles are always square. */
+    aspect: number
     corner: Corner
     mirror: boolean
   }
@@ -119,6 +163,10 @@ export interface ZoomSegment extends Segment {
   mode: 'follow' | 'fixed'
   target: { x: number; y: number }
   auto: boolean
+  /** Keeps the segment on the timeline without zooming. */
+  disabled?: boolean
+  /** 0..1: a focus this close to an edge snaps onto it, which may show the background past the screen. */
+  snapEdges?: number
 }
 
 export interface SpeedSegment extends Segment {

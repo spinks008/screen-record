@@ -29,16 +29,28 @@ export function outputSize(style: Style, src: { width: number; height: number },
   return { width: even(height), height: even(height / ar) }
 }
 
-/** Where the (cropped) screen is drawn before zooming, in output pixels. */
+/** Width of the inset bezel in output pixels (0 when off). */
+export function insetPx(style: Style, out: { width: number; height: number }): number {
+  return style.inset.enabled ? Math.max(0, style.inset.width) * (Math.min(out.width, out.height) / 1080) : 0
+}
+
+/** Where the (cropped) screen content is drawn before zooming, in output pixels (inside the inset). */
 export function screenRect(style: Style, src: { width: number; height: number }, out: { width: number; height: number }): Rect {
   const pad = style.padding * Math.min(out.width, out.height)
-  const availW = out.width - pad * 2
-  const availH = out.height - pad * 2
+  const inset = insetPx(style, out)
+  const availW = Math.max(2, out.width - pad * 2 - inset * 2)
+  const availH = Math.max(2, out.height - pad * 2 - inset * 2)
   const c = croppedSize(style, src)
   const s = Math.min(availW / c.width, availH / c.height)
   const w = c.width * s
   const h = c.height * s
   return { x: (out.width - w) / 2, y: (out.height - h) / 2, width: w, height: h }
+}
+
+/** The card behind the screen: the screen rect grown by the inset. Its shadow and corners are drawn here. */
+export function cardRect(style: Style, screen: Rect, out: { width: number; height: number }): Rect {
+  const i = insetPx(style, out)
+  return { x: screen.x - i, y: screen.y - i, width: screen.width + i * 2, height: screen.height + i * 2 }
 }
 
 export interface SceneTransform {
@@ -49,22 +61,13 @@ export interface SceneTransform {
 }
 
 /**
- * Scene transform for a viewport: zoom about the focus point while keeping the
- * view inside the screen once zoomed far enough that the screen covers the frame.
+ * Scene transform for a viewport: zoom so the focus point sits at the center of the frame.
+ * The camera track already keeps the view inside the screen, so no clamping happens here.
  */
 export function sceneTransform(vp: Viewport, screen: Rect, out: { width: number; height: number }): SceneTransform {
   const s = vp.scale
-  const focusX = screen.x + vp.fx * screen.width
-  const focusY = screen.y + vp.fy * screen.height
-  let cx = out.width / 2 + (focusX - out.width / 2) * Math.min(1, vp.amount)
-  let cy = out.height / 2 + (focusY - out.height / 2) * Math.min(1, vp.amount)
-  const halfW = out.width / (2 * s)
-  const halfH = out.height / (2 * s)
-  // Zoomed in: keep the view inside the screen. Zoomed out (view wider than the screen):
-  // keep the whole screen inside the view. Both bounds meet at the screen center, so motion stays continuous.
-  const clamp = (v: number, a: number, b: number): number => Math.min(Math.max(a, b), Math.max(Math.min(a, b), v))
-  cx = clamp(cx, screen.x + halfW, screen.x + screen.width - halfW)
-  cy = clamp(cy, screen.y + halfH, screen.y + screen.height - halfH)
+  const cx = screen.x + vp.fx * screen.width
+  const cy = screen.y + vp.fy * screen.height
   return { scale: s, tx: out.width / 2 - cx * s, ty: out.height / 2 - cy * s }
 }
 
@@ -75,12 +78,16 @@ export function sourceToScreen(style: Style, src: { width: number; height: numbe
   return { x: screen.x + nx * screen.width, y: screen.y + ny * screen.height }
 }
 
+/** The webcam bubble. `size` is its longer side as a fraction of the output's shorter side. */
 export function cameraRect(style: Style, out: { width: number; height: number }): Rect {
   const minSide = Math.min(out.width, out.height)
   const size = style.camera.size * minSide
+  const aspect = style.camera.shape === 'circle' ? 1 : Math.min(3, Math.max(1 / 3, style.camera.aspect || 1))
+  const width = aspect >= 1 ? size : size * aspect
+  const height = aspect >= 1 ? size / aspect : size
   const margin = minSide * 0.035
   const corner: Corner = style.camera.corner
-  const x = corner.endsWith('left') ? margin : out.width - size - margin
-  const y = corner.startsWith('top') ? margin : out.height - size - margin
-  return { x, y, width: size, height: size }
+  const x = corner.endsWith('left') ? margin : out.width - width - margin
+  const y = corner.startsWith('top') ? margin : out.height - height - margin
+  return { x, y, width, height }
 }

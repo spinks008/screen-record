@@ -19,7 +19,7 @@ export interface AutoZoomOptions {
 }
 
 export const DEFAULT_AUTO_ZOOM: AutoZoomOptions = {
-  zoom: 1.7,
+  zoom: 1.6,
   leadMs: 450,
   holdMs: 1600,
   burstGapMs: 2200,
@@ -84,14 +84,14 @@ export function generateAutoZooms(
     let end = Math.min(durationMs, burst[burst.length - 1].t + o.holdMs)
     if (end - start < o.minDurationMs) end = Math.min(durationMs, start + o.minDurationMs)
     if (end - start < o.minDurationMs) start = Math.max(0, end - o.minDurationMs)
-    const avg = (a: number[]): number => a.reduce((s, v) => s + v, 0) / a.length
     zooms.push({
       id: newId('zoom'),
       start,
       end,
       zoom: o.zoom,
       mode: 'follow',
-      target: { x: avg(xs), y: avg(ys) },
+      // Zoom into the first click; the camera then follows the cursor to the later ones.
+      target: { x: xs[0], y: ys[0] },
       auto: true
     })
   }

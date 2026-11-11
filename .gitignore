@@ -5,3 +5,5 @@ resources/bin/*.exe
 *.log
 *.tsbuildinfo
 .vite/
+# Recordings dropped in the project root (references, test captures) stay out of git.
+/*.mp4

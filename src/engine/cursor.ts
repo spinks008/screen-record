@@ -1,5 +1,5 @@
 // Re-renders the recorded cursor: spring smoothing, idle hiding, click effects and cursor shapes.
-import type { CursorKind, InputEvent, Style } from '@shared/types'
+import type { CursorKind, InputEvent, SpringConfig, Style } from '@shared/types'
 
 export const TRACK_HZ = 120
 
@@ -9,17 +9,6 @@ export interface Track {
   start: number
   xs: Float32Array
   ys: Float32Array
-}
-
-export interface SpringParams {
-  stiffness: number
-  damping: number
-}
-
-export const CURSOR_SPRINGS: Record<Exclude<Style['cursor']['smoothing'], 'off'>, SpringParams> = {
-  slow: { stiffness: 90, damping: 19 },
-  fast: { stiffness: 260, damping: 32 },
-  rapid: { stiffness: 650, damping: 51 }
 }
 
 interface Point {
@@ -70,8 +59,8 @@ export function resample(points: Point[], durationMs: number, hz = TRACK_HZ): Tr
   return { step, start: 0, xs, ys }
 }
 
-/** Critically-damped-ish spring following the input track (semi-implicit Euler with substeps). */
-export function springSmooth(track: Track, p: SpringParams): Track {
+/** Spring following the input track (semi-implicit Euler with substeps). */
+export function springSmooth(track: Track, p: SpringConfig): Track {
   const n = track.xs.length
   const xs = new Float32Array(n)
   const ys = new Float32Array(n)
@@ -89,8 +78,8 @@ export function springSmooth(track: Track, p: SpringParams): Track {
       y = ty
     }
     for (let s = 0; s < sub; s++) {
-      vx += (p.stiffness * (tx - x) - p.damping * vx) * dt
-      vy += (p.stiffness * (ty - y) - p.damping * vy) * dt
+      vx += ((p.tension * (tx - x) - p.friction * vx) / p.mass) * dt
+      vy += ((p.tension * (ty - y) - p.friction * vy) / p.mass) * dt
       x += vx * dt
       y += vy * dt
     }
@@ -108,6 +97,28 @@ export function sampleTrack(track: Track, t: number): { x: number; y: number } {
   return { x: track.xs[i] + (track.xs[k] - track.xs[i]) * a, y: track.ys[i] + (track.ys[k] - track.ys[i]) * a }
 }
 
+/**
+ * Zero-lag smoothing: two centered moving averages (together a triangular window of `windowMs`).
+ * Unlike a spring it does not trail behind, which suits paths that are computed ahead of time.
+ */
+export function smoothTrack(track: Track, windowMs: number): Track {
+  const n = track.xs.length
+  if (n === 0 || Number.isNaN(track.xs[0])) return track
+  const r = Math.max(1, Math.round(windowMs / 4 / track.step))
+  const pass = (src: Float32Array): Float32Array => {
+    const sum = new Float64Array(n + 1)
+    for (let i = 0; i < n; i++) sum[i + 1] = sum[i] + src[i]
+    const out = new Float32Array(n)
+    for (let i = 0; i < n; i++) {
+      const a = Math.max(0, i - r)
+      const b = Math.min(n - 1, i + r)
+      out[i] = (sum[b + 1] - sum[a]) / (b - a + 1)
+    }
+    return out
+  }
+  return { step: track.step, start: track.start, xs: pass(pass(track.xs)), ys: pass(pass(track.ys)) }
+}
+
 export interface CursorModel {
   raw: Track
   smooth: Track
@@ -120,10 +131,34 @@ export interface CursorModel {
   hasData: boolean
 }
 
-export function buildCursorModel(events: InputEvent[], durationMs: number, smoothing: Style['cursor']['smoothing']): CursorModel {
+/**
+ * Drops cursor shapes shown for less than `holdMs` (e.g. an I-beam flashing while the mouse
+ * crosses a text field); the previous shape simply continues.
+ */
+export function holdCursorKinds(kinds: { t: number; kind: CursorKind }[], holdMs: number): { t: number; kind: CursorKind }[] {
+  const dedupe = (list: { t: number; kind: CursorKind }[]): { t: number; kind: CursorKind }[] =>
+    list.filter((k, i) => i === 0 || k.kind !== list[i - 1].kind)
+  let runs = dedupe(kinds)
+  if (holdMs <= 0) return runs
+  // Removing a short run can merge its neighbours, so repeat until stable.
+  for (;;) {
+    const kept = runs.filter((k, i) => i === 0 || i === runs.length - 1 || runs[i + 1].t - k.t >= holdMs)
+    const next = dedupe(kept)
+    if (next.length === runs.length) return next
+    runs = next
+  }
+}
+
+export interface CursorModelOptions {
+  /** Spring for smoothing, or null to use the raw movement. */
+  spring: SpringConfig | null
+  typeHoldMs?: number
+}
+
+export function buildCursorModel(events: InputEvent[], durationMs: number, opts: CursorModelOptions): CursorModel {
   const pts = rawPositions(events)
   const raw = resample(pts, durationMs)
-  const smooth = smoothing === 'off' ? raw : springSmooth(raw, CURSOR_SPRINGS[smoothing])
+  const smooth = opts.spring ? springSmooth(raw, opts.spring) : raw
   const moveTimes: number[] = []
   let last: Point | null = null
   for (const p of pts) {
@@ -132,9 +167,10 @@ export function buildCursorModel(events: InputEvent[], durationMs: number, smoot
       last = p
     }
   }
-  const kinds: { t: number; kind: CursorKind }[] = []
-  for (const e of events) if (e.type === 'move' && e.cursor) kinds.push({ t: e.t, kind: e.cursor })
-  kinds.sort((a, b) => a.t - b.t)
+  const allKinds: { t: number; kind: CursorKind }[] = []
+  for (const e of events) if (e.type === 'move' && e.cursor) allKinds.push({ t: e.t, kind: e.cursor })
+  allKinds.sort((a, b) => a.t - b.t)
+  const kinds = holdCursorKinds(allKinds, opts.typeHoldMs ?? 0)
   const downs: { t: number; up: number; button: number }[] = []
   for (const e of events) {
     if (e.type === 'down') downs.push({ t: e.t, up: Infinity, button: e.button })
@@ -181,7 +217,7 @@ export interface CursorFrame {
   alpha: number
   /** Press scale (1 = released). */
   scale: number
-  /** Ripple progress 0..1 for the latest click, or -1 when none is active. */
+  /** Click effect progress 0..1 for the latest click, or -1 when none is active. */
   ripple: number
   rippleX: number
   rippleY: number
@@ -215,7 +251,7 @@ export function cursorAt(model: CursorModel, t: number, style: Style['cursor'], 
     if (alpha < 1 && next !== undefined && next - t < 120) alpha = Math.max(alpha, 1 - (next - t) / 120)
   }
 
-  const ki = lastIndexAtOrBefore(model.kindTimes, t)
+  const ki = style.alwaysArrow ? -1 : lastIndexAtOrBefore(model.kindTimes, t)
   const kind = ki >= 0 ? model.kinds[ki].kind : 'arrow'
 
   let scale = 1
@@ -227,7 +263,7 @@ export function cursorAt(model: CursorModel, t: number, style: Style['cursor'], 
     const d = model.downs[di]
     if (t < d.up) scale = 0.82
     else if (t - d.up < 120) scale = 0.82 + 0.18 * ((t - d.up) / 120)
-    if (style.clickEffect && t - d.t < RIPPLE_MS) {
+    if (style.clickEffect !== 'none' && t - d.t < RIPPLE_MS) {
       ripple = (t - d.t) / RIPPLE_MS
       const p = sampleTrack(model.raw, d.t)
       rippleX = p.x

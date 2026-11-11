@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, w
 import { join } from 'node:path'
 import type { InputEvent, Project, ProjectSummary } from '@shared/types'
 import { projectsRoot } from '../paths'
+import { normalizeStyle } from '../../../src/engine/defaults'
 
 export function projectDir(id: string): string {
   if (!/^[\w-]+$/.test(id)) throw new Error('Invalid project id')
@@ -22,7 +23,10 @@ export function createProjectDir(id: string): string {
 }
 
 export function loadProject(id: string): Project {
-  return JSON.parse(readFileSync(join(projectDir(id), 'project.json'), 'utf8')) as Project
+  const project = JSON.parse(readFileSync(join(projectDir(id), 'project.json'), 'utf8')) as Project
+  // Older projects get the current style shape (new fields defaulted, old ones mapped).
+  project.edit.style = normalizeStyle(project.edit.style)
+  return project
 }
 
 export function saveProject(project: Project): void {
