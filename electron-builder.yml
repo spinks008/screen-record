@@ -1,0 +1,30 @@
+appId: com.screenrecord.app
+productName: Screen Record
+# Native deps (uiohook-napi, koffi) ship N-API prebuilds; no compiler needed.
+npmRebuild: false
+directories:
+  output: release
+  buildResources: build
+files:
+  - out/**
+  - package.json
+  - "!out/tmp/**"
+asarUnpack:
+  - node_modules/uiohook-napi/**
+  - node_modules/koffi/**
+extraResources:
+  - from: resources/bin
+    to: bin
+    filter: ["ffmpeg.exe", "ffprobe.exe"]
+  - from: resources
+    to: .
+    filter: ["icon.png", "tray.png"]
+win:
+  target: nsis
+  icon: build/icon.png
+  executableName: Screen Record
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  shortcutName: Screen Record
+  createDesktopShortcut: true
