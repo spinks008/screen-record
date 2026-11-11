@@ -4,9 +4,25 @@
   "version": "0.1.1",
   "description": "Screen recorder for Windows with automatic zoom, smooth cursor and a polished editor",
   "main": "out/main/index.js",
-  "author": "Screen Record",
-  "license": "UNLICENSED",
+  "author": "SPINKS",
+  "license": "MIT",
   "private": true,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/spinks008/screen-record.git"
+  },
+  "homepage": "https://github.com/spinks008/screen-record#readme",
+  "bugs": {
+    "url": "https://github.com/spinks008/screen-record/issues"
+  },
+  "keywords": [
+    "screen-recorder",
+    "screen-recording",
+    "auto-zoom",
+    "video-editor",
+    "electron",
+    "windows"
+  ],
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build",
